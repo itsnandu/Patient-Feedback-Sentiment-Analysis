@@ -1,0 +1,40 @@
+Patient Feedback Sentiment
+Bag-of-n-grams
+How a patient-experience team catches negated complaints a plain word model misses.
+Healthcare NLP Use Case — Claude Code / NLP training series
+Use Case 2: Patient Feedback Sentiment
+Scenario
+Every patient discharged from Riverside Regional and its two satellite clinics receives an email a day later with a short survey: a 1–5 star rating and an open box, “Tell us about your stay.” The star rating alone gets logged into a dashboard automatically, but it hides a lot — a patient can leave 4 stars and still describe, in the free-text box, one specific bad interaction that the hospital genuinely wants to know about and follow up on. Historically, this is exactly what the patient-experience team relied on the free text for: reading every single response, regardless of star rating, to catch the complaints the star rating alone wouldn't reveal.
+That worked when the hospital had one site and a modest number of discharges a month. Since the merger with two satellite clinics eighteen months ago, survey volume has roughly tripled, and the patient-experience team is the same size it was before the merger. They are now several days behind on reading responses, which defeats the purpose — a complaint that isn't followed up on for a week is a missed opportunity, and in a few cases has become a formal complaint that could have been caught and addressed within a day.
+The team doesn't want to stop reading feedback — they want to stop reading all of it. The ask is a model that flags free-text responses as likely Dissatisfied so the team's limited reading time goes to the ones that need a human first, with the rest reviewed on a rolling basis as time allows rather than urgently. The training data is two years of past responses where a coordinator, at the time, tagged each one Satisfied or Dissatisfied as part of the existing (manual, backlogged) workflow.
+One further wrinkle that shaped the whole approach: an earlier, quick attempt at this used a plain word-frequency model and was scrapped almost immediately, because it was flagging clearly positive reviews like “the staff were not rude at all, very professional” as Dissatisfied — it had learned that the word “rude” correlates with negative feedback and had no way to notice the “not” in front of it. Getting negation right is not a nice-to-have for this use case; it's the entire reason the first attempt failed.
+Why Bag-of-n-grams
+Patient feedback leans heavily on negation — “not helpful,” “not clean,” “not rude” — and a plain Bag-of-Words model treats “not” and “rude” as two independent words, so “the staff were not rude” (positive) and “the doctor was rude” (negative) look almost identical to it: both simply contain “rude.” Extending the vectorizer to include bigrams (ngram_range=(1, 2)) captures “not rude” and “not helpful” as single features in their own right, so the negation is preserved as a distinct signal instead of being averaged away.
+Data Cleaning Requirements
+This dataset is noisier than a hospital's own systems, because it comes through a third-party survey vendor and reflects however each patient chose to type on their own phone or computer:
+Expand contractions before any negation-sensitive feature extraction — “wasn't” → “was not”, “didn't” → “did not”. This has to happen before bigram extraction: otherwise “was not rude” and “wasn't rude” are two completely different bigrams to the vectorizer, and the model only ever learns the negation pattern from whichever spelling happens to dominate the training data.
+Replace literal “<br>” / “<br/>” tags left over from the vendor's web-form export with a single space, not deleted outright — deleting them fuses the words on either side into one nonsense token (“staff<br>were” → “staffwere”).
+Normalize runs of repeated punctuation used for emphasis (“!!!”, “??”, “....”) down to a single mark, so “great!!!” and “great!” contribute the same signal instead of being silently treated as different amounts of enthusiasm the model has no way to use.
+Convert emoji into a small fixed sentiment-adjacent vocabulary rather than deleting them — the smiling-face family maps to a token EMOJI_POSITIVE, the frowning/angry family to EMOJI_NEGATIVE. A response that is purely an emoji should not collapse to an empty, unclassifiable input.
+Replace any staff first name mentioned in the text with a generic STAFF_NAME token, matched against the hospital's current staff roster. Without this, the model can learn to associate one specific employee's name with negative sentiment purely because that name happened to show up in a handful of bad reviews during the training window — which won't generalize, and is unfair to that employee.
+Run a lightweight language-detection pass and set aside the (small but real) share of responses written in Spanish, rather than feeding them through an English stopword list and an English-trained vectorizer, which would otherwise silently strip meaningful Spanish words as unrecognized noise and produce a meaningless prediction.
+For longer responses, split on strong contrastive conjunctions (“but”, “however”) into separate segments before vectorizing, since sentiment frequently flips mid-response — “the nurses were wonderful, but the wait time was unacceptable” — and folding both halves into one bag-of-n-grams vector can wash the negative half out entirely.
+Cleaning in Practice
+Raw (as received)
+After cleaning
+the staff werent rude at all!!! very professional 😀
+the staff were not rude at all! very professional emoji_positive
+Dr. Priya was dismissive and made me feel rushed<br>would not recommend
+staff_name was dismissive and made me feel rushed would not recommend
+the nurses were wonderful, but the wait time was unacceptable
+[seg 1] the nurses were wonderful  |  [seg 2] the wait time was unacceptable
+Pipeline
+Apply the cleaning pass above (contraction expansion → markup/punctuation cleanup → emoji mapping → staff-name masking → language filter → optional clause split) to every historical response.
+CountVectorizer(ngram_range=(1, 2)) extracts both single words and two-word phrases as features from the cleaned text.
+Train Multinomial Naive Bayes on the resulting unigram + bigram vectors against the Satisfied / Dissatisfied labels.
+Compare against a unigram-only model on the same held-out, negation-heavy responses to confirm the bigram version is actually earning its extra complexity.
+Expected Outcome
+On a held-out, negation-heavy set, a unigram-only model mislabels sentences like “the manager was not rude” as Dissatisfied; the unigram+bigram model gets them right because “not rude” is now a feature in its own right.
+The patient-experience team's queue is reordered so flagged Dissatisfied responses surface first, with everything else reviewed on the existing rolling schedule instead of urgently.
+Because staff names are masked before training, the model's flags are driven by what was said, not by which employee happened to be named — which also makes the model's behavior easier to defend if a staff member asks why a review was flagged.
+Spanish-language responses are routed to a human reviewer directly rather than silently mis-scored, which the team explicitly asked for over a future Spanish-specific model, given the current volume.
